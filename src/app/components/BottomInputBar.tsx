@@ -127,7 +127,7 @@ export function BottomInputBar({
           ) : submitError ? (
             <p className="text-[#E53E3E]">❌ {submitError}</p>
           ) : isListening ? (
-            <p className="text-[#E53E3E]">🎙️ 듣고 있어요… (최대 10초, 🎙️ 다시 눌러 중단)</p>
+            <p className="text-[#E53E3E]">🎙️ 듣고 있어요… 말을 멈추면 자동 완료 (최대 10초, 🎙️ 다시 눌러 중단)</p>
           ) : (
             <span className="invisible select-none" aria-hidden="true">
               &#8203;

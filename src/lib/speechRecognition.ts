@@ -92,7 +92,15 @@ export function unregisterActiveRecognition(recognition: SpeechRecognitionInstan
   }
 }
 
-/** devTools 콘솔에서 원인 확인용 */
+/** 전체 results 배열에서 텍스트 추출 (Chrome interim-only 대응) */
+export function readTranscriptFromEvent(event: SpeechRecognitionEvent): string {
+  let transcript = "";
+  for (let i = 0; i < event.results.length; i++) {
+    transcript += event.results[i][0]?.transcript ?? "";
+  }
+  return transcript.trim();
+}
+
 export function logSpeechError(error: string, message?: string): void {
   if (import.meta.env.DEV) {
     console.warn("[mylog speech]", error, message ?? "");

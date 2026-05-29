@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   getSpeechRecognitionCtor,
-  isIosDevice,
   isSpeechRecognitionSupported,
   logSpeechError,
   mapSpeechError,
+  readTranscriptFromEvent,
   registerActiveRecognition,
   releaseActiveRecognition,
   unregisterActiveRecognition,
@@ -12,12 +12,13 @@ import {
 } from "@/lib/speechRecognition";
 
 const DEFAULT_LISTEN_TIMEOUT_MS = 10_000;
-/** stop() 후 onend 미발화 시 강제 정리 대기 (Chrome 데스크톱) */
-const END_GRACE_MS = 300;
+/** 말한 뒤 침묵 시 자동 종료 (onend 미발화 대비) */
+const SILENCE_TIMEOUT_MS = 2_500;
+/** stop() 후 onend 미발화 시 강제 정리 대기 */
+const END_GRACE_MS = 600;
 
 export interface UseSpeechRecognitionOptions {
   lang?: string;
-  /** 최대 녹음 시간 (기본 10초) */
   listenTimeoutMs?: number;
   onTranscript?: (text: string, isFinal: boolean) => void;
   onComplete?: (text: string) => void;
@@ -34,12 +35,14 @@ export function useSpeechRecognition({
   const [isListening, setIsListening] = useState(false);
   const [isSupported] = useState(isSpeechRecognitionSupported);
   const recognitionRef = useRef<SpeechRecognitionInstance | null>(null);
-  const finalTranscriptRef = useRef("");
+  const latestTranscriptRef = useRef("");
   const callbacksRef = useRef({ onTranscript, onComplete, onError });
   const isListeningRef = useRef(false);
   const userStopRef = useRef(false);
   const sessionEndedRef = useRef(false);
-  const listenTimeoutRef = useRef<number | null>(null);
+  const hasResultRef = useRef(false);
+  const maxListenTimeoutRef = useRef<number | null>(null);
+  const silenceTimeoutRef = useRef<number | null>(null);
   const endGraceRef = useRef<number | null>(null);
 
   useEffect(() => {
@@ -52,9 +55,13 @@ export function useSpeechRecognition({
   }, []);
 
   const clearTimers = useCallback(() => {
-    if (listenTimeoutRef.current != null) {
-      window.clearTimeout(listenTimeoutRef.current);
-      listenTimeoutRef.current = null;
+    if (maxListenTimeoutRef.current != null) {
+      window.clearTimeout(maxListenTimeoutRef.current);
+      maxListenTimeoutRef.current = null;
+    }
+    if (silenceTimeoutRef.current != null) {
+      window.clearTimeout(silenceTimeoutRef.current);
+      silenceTimeoutRef.current = null;
     }
     if (endGraceRef.current != null) {
       window.clearTimeout(endGraceRef.current);
@@ -68,7 +75,7 @@ export function useSpeechRecognition({
       sessionEndedRef.current = true;
       clearTimers();
 
-      const text = finalTranscriptRef.current.trim();
+      const text = latestTranscriptRef.current.trim();
       const active = recognition ?? recognitionRef.current;
       if (active) {
         unregisterActiveRecognition(active);
@@ -77,11 +84,20 @@ export function useSpeechRecognition({
         recognitionRef.current = null;
       }
       setListening(false);
+
+      const wasUserStop = userStopRef.current;
       userStopRef.current = false;
 
       if (text) {
         callbacksRef.current.onTranscript?.(text, true);
         callbacksRef.current.onComplete?.(text);
+        return;
+      }
+
+      if (!hasResultRef.current && !wasUserStop) {
+        callbacksRef.current.onError?.(
+          "음성이 인식되지 않았습니다. 마이크 권한과 입력 장치를 확인해주세요.",
+        );
       }
     },
     [clearTimers, setListening],
@@ -94,14 +110,7 @@ export function useSpeechRecognition({
       endGraceRef.current = window.setTimeout(() => {
         endGraceRef.current = null;
         if (sessionEndedRef.current) return;
-
-        if (recognitionRef.current === recognition) {
-          try {
-            recognition.abort();
-          } catch {
-            /* Chrome may ignore abort after stop */
-          }
-        }
+        // abort()는 Chrome에서 interim 결과를 날릴 수 있어 stop()만 사용
         finalizeSession(recognition);
       }, END_GRACE_MS);
     },
@@ -112,9 +121,13 @@ export function useSpeechRecognition({
     (recognition: SpeechRecognitionInstance) => {
       if (sessionEndedRef.current) return;
 
-      if (listenTimeoutRef.current != null) {
-        window.clearTimeout(listenTimeoutRef.current);
-        listenTimeoutRef.current = null;
+      if (silenceTimeoutRef.current != null) {
+        window.clearTimeout(silenceTimeoutRef.current);
+        silenceTimeoutRef.current = null;
+      }
+      if (maxListenTimeoutRef.current != null) {
+        window.clearTimeout(maxListenTimeoutRef.current);
+        maxListenTimeoutRef.current = null;
       }
 
       try {
@@ -128,6 +141,21 @@ export function useSpeechRecognition({
       scheduleForcedFinalize(recognition);
     },
     [finalizeSession, scheduleForcedFinalize],
+  );
+
+  const resetSilenceTimeout = useCallback(
+    (recognition: SpeechRecognitionInstance) => {
+      if (silenceTimeoutRef.current != null) {
+        window.clearTimeout(silenceTimeoutRef.current);
+      }
+      silenceTimeoutRef.current = window.setTimeout(() => {
+        silenceTimeoutRef.current = null;
+        if (!sessionEndedRef.current && recognitionRef.current === recognition) {
+          requestEnd(recognition);
+        }
+      }, SILENCE_TIMEOUT_MS);
+    },
+    [requestEnd],
   );
 
   const cleanupRecognition = useCallback(
@@ -144,9 +172,6 @@ export function useSpeechRecognition({
     [clearTimers, setListening],
   );
 
-  /**
-   * ⚠️ recognition.start()는 사용자 클릭 직후 동기 호출해야 함.
-   */
   const start = useCallback(() => {
     if (isListeningRef.current) {
       return;
@@ -159,21 +184,24 @@ export function useSpeechRecognition({
     }
 
     releaseActiveRecognition();
-    finalTranscriptRef.current = "";
+    latestTranscriptRef.current = "";
+    hasResultRef.current = false;
     userStopRef.current = false;
     sessionEndedRef.current = false;
     clearTimers();
 
     const recognition = new Ctor();
     recognition.lang = lang;
-    recognition.continuous = !isIosDevice();
+    // 데스크톱 Chrome: continuous=true 시 onend/onresult 불안정 → false 통일
+    recognition.continuous = false;
     recognition.interimResults = true;
     recognition.maxAlternatives = 1;
 
     recognition.onstart = () => {
       setListening(true);
-      listenTimeoutRef.current = window.setTimeout(() => {
-        listenTimeoutRef.current = null;
+      resetSilenceTimeout(recognition);
+      maxListenTimeoutRef.current = window.setTimeout(() => {
+        maxListenTimeoutRef.current = null;
         if (!sessionEndedRef.current && recognitionRef.current === recognition) {
           requestEnd(recognition);
         }
@@ -181,18 +209,11 @@ export function useSpeechRecognition({
     };
 
     recognition.onresult = (event) => {
-      let interim = "";
-      for (let i = event.resultIndex; i < event.results.length; i++) {
-        const result = event.results[i];
-        const piece = result[0]?.transcript ?? "";
-        if (result.isFinal) {
-          finalTranscriptRef.current += piece;
-        } else {
-          interim += piece;
-        }
-      }
-      const combined = (finalTranscriptRef.current + interim).trim();
-      callbacksRef.current.onTranscript?.(combined, false);
+      hasResultRef.current = true;
+      const transcript = readTranscriptFromEvent(event);
+      latestTranscriptRef.current = transcript;
+      callbacksRef.current.onTranscript?.(transcript, false);
+      resetSilenceTimeout(recognition);
     };
 
     recognition.onend = () => {
@@ -203,14 +224,7 @@ export function useSpeechRecognition({
     recognition.onerror = (event) => {
       logSpeechError(event.error, event.message);
 
-      if (event.error === "aborted") {
-        if (!sessionEndedRef.current) {
-          finalizeSession(recognition);
-        }
-        return;
-      }
-
-      if (event.error === "no-speech") {
+      if (event.error === "aborted" || event.error === "no-speech") {
         if (!sessionEndedRef.current) {
           finalizeSession(recognition);
         }
@@ -246,6 +260,7 @@ export function useSpeechRecognition({
     lang,
     listenTimeoutMs,
     requestEnd,
+    resetSilenceTimeout,
     setListening,
   ]);
 
@@ -274,7 +289,11 @@ export function useSpeechRecognition({
       if (recognition) {
         recognition.onerror = null;
         recognition.onend = null;
-        recognition.abort();
+        try {
+          recognition.abort();
+        } catch {
+          /* ignore */
+        }
         unregisterActiveRecognition(recognition);
       }
       recognitionRef.current = null;
