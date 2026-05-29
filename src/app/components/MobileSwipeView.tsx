@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef } from 'react';
 import { Sidebar } from './Sidebar';
 import { CenterTimeline } from './CenterTimeline';
 import { RightPanel } from './RightPanel';
@@ -18,6 +18,8 @@ interface MobileSwipeViewProps {
   onRetryAnalysis?: (entryId: string) => void;
   isSubmitting?: boolean;
   submitError?: string;
+  dashboardLoadError?: string;
+  dataHint?: { email: string; totalEntries: number; todayKst: string } | null;
   todaySummary: TodaySummaryView;
   recentLogs: RecentLogItem[];
   confirmedRoutines: DetectedRoutine[];
@@ -32,6 +34,7 @@ interface MobileSwipeViewProps {
   todayAiReport: AiReport | null;
   weekAiReports: AiReport[];
   pastToday: PastTodayItem[];
+  booksReadThisMonth: number;
 }
 
 export function MobileSwipeView({
@@ -44,6 +47,8 @@ export function MobileSwipeView({
   onRetryAnalysis,
   isSubmitting = false,
   submitError = '',
+  dashboardLoadError = '',
+  dataHint = null,
   todaySummary,
   recentLogs,
   confirmedRoutines,
@@ -58,6 +63,7 @@ export function MobileSwipeView({
   todayAiReport,
   weekAiReports,
   pastToday,
+  booksReadThisMonth,
 }: MobileSwipeViewProps) {
   const [currentPanel, setCurrentPanel] = useState(1); // 0: sidebar, 1: timeline, 2: analysis
   const containerRef = useRef<HTMLDivElement>(null);
@@ -101,33 +107,45 @@ export function MobileSwipeView({
     <div className="h-screen flex flex-col bg-white">
       {/* Top Header */}
       <div className="fixed top-0 left-0 right-0 bg-white z-30 border-b border-[#F7F7F5]">
-        <div className="flex items-center justify-center py-4">
-          <h1 className="text-lg font-bold text-[#1A1A1A]">마이로그</h1>
+        <div className="flex items-center justify-center pt-3 pb-0">
+          <h1 className="text-lg font-bold text-[#1A1A1A] leading-tight">마이로그</h1>
         </div>
-        {/* Panel Indicator */}
-        <div className="flex justify-center gap-2 pb-3">
-          <div
-            className={`w-2 h-2 rounded-full transition-colors ${
-              currentPanel === 0 ? 'bg-black' : 'bg-[#E5E5E5]'
-            }`}
-          />
-          <div
-            className={`w-2 h-2 rounded-full transition-colors ${
-              currentPanel === 1 ? 'bg-black' : 'bg-[#E5E5E5]'
-            }`}
-          />
-          <div
-            className={`w-2 h-2 rounded-full transition-colors ${
-              currentPanel === 2 ? 'bg-black' : 'bg-[#E5E5E5]'
-            }`}
-          />
-        </div>
+        {/* Panel Indicator — 탭으로 패널 이동 */}
+        <nav
+          className="flex justify-center items-center gap-0 pb-2 pt-0.5"
+          aria-label="화면 전환"
+        >
+          {(
+            [
+              { index: 0, label: '루틴·캘린더' },
+              { index: 1, label: '오늘 기록' },
+              { index: 2, label: '오늘 분석' },
+            ] as const
+          ).map(({ index, label }) => (
+            <button
+              key={index}
+              type="button"
+              onClick={() => setCurrentPanel(index)}
+              aria-label={label}
+              aria-current={currentPanel === index ? 'page' : undefined}
+              className="p-1.5 rounded-full hover:bg-[#F7F7F5] transition-colors"
+            >
+              <span
+                className={`block rounded-full transition-all ${
+                  currentPanel === index
+                    ? 'w-2.5 h-2.5 bg-black'
+                    : 'w-2 h-2 bg-[#E5E5E5]'
+                }`}
+              />
+            </button>
+          ))}
+        </nav>
       </div>
 
       {/* Swipeable Content */}
       <div
         ref={containerRef}
-        className="flex-1 overflow-hidden pt-24 pb-32"
+        className="flex-1 overflow-hidden pt-[4.25rem] pb-28"
         onTouchStart={handleTouchStart}
         onTouchMove={handleTouchMove}
         onTouchEnd={handleTouchEnd}
@@ -165,6 +183,8 @@ export function MobileSwipeView({
               onRetryAnalysis={onRetryAnalysis}
               isSubmitting={isSubmitting}
               submitError={submitError}
+              dashboardLoadError={dashboardLoadError}
+              dataHint={dataHint}
               todaySummary={todaySummary}
             />
           </div>
@@ -176,6 +196,7 @@ export function MobileSwipeView({
               weekAiReports={weekAiReports}
               todaySummary={todaySummary}
               pastToday={pastToday}
+              booksReadThisMonth={booksReadThisMonth}
             />
           </div>
         </div>

@@ -8,6 +8,7 @@ interface RightPanelProps {
   weekAiReports: AiReport[];
   todaySummary: TodaySummaryView;
   pastToday: PastTodayItem[];
+  booksReadThisMonth: number;
 }
 
 function buildWeekMoodData(reports: AiReport[]) {
@@ -38,6 +39,7 @@ export function RightPanel({
   weekAiReports,
   todaySummary,
   pastToday,
+  booksReadThisMonth,
 }: RightPanelProps) {
   const weekMood = buildWeekMoodData(weekAiReports);
   const patternAlerts = parsePatternAlerts(todayAiReport?.pattern_alerts);
@@ -59,6 +61,12 @@ export function RightPanel({
             <div className="text-xs text-[#6B6B6B] mb-1">😊 기분 평균</div>
             <div className="text-lg text-[#1A1A1A] font-medium">
               {todaySummary.moodLabel ?? '—'}
+            </div>
+          </div>
+          <div className="bg-white rounded-lg p-4 shadow-[0_2px_8px_rgba(0,0,0,0.06)]">
+            <div className="text-xs text-[#6B6B6B] mb-1">📚 이번 달 독서</div>
+            <div className="text-lg text-[#1A1A1A] font-medium">
+              {booksReadThisMonth > 0 ? `${booksReadThisMonth}권 읽음` : '—'}
             </div>
           </div>
           <div className="bg-white rounded-lg p-4 shadow-[0_2px_8px_rgba(0,0,0,0.06)]">

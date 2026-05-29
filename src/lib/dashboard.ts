@@ -11,6 +11,7 @@ import { loadTodayEntries } from "@/lib/entries";
 import { loadAiReportForDate, loadWeekAiReports, parsePatternAlerts, type AiReport } from "@/lib/reports";
 import { buildRoutineCompletionMap, countCompletedRoutinesToday } from "@/lib/routineAnalysis";
 import { formatCaloriesInline, sumMealCaloriesFromEntries } from "@/lib/meals";
+import { countBooksDoneThisMonth } from "@/lib/books";
 import { loadDetectedRoutines, type DetectedRoutine } from "@/lib/routines";
 import { supabase } from "@/lib/supabase";
 
@@ -45,6 +46,7 @@ export interface DashboardData {
   monthMoodByDay: Record<number, string>;
   pastToday: PastTodayItem[];
   todaySummary: TodaySummaryView;
+  booksReadThisMonth: number;
 }
 
 function averageMood(entries: EntryRecord[]): number | null {
@@ -199,20 +201,42 @@ async function loadPastToday(userId: string, today: string): Promise<PastTodayIt
   return items;
 }
 
+function settled<T>(result: PromiseSettledResult<T>, label: string, fallback: T): T {
+  if (result.status === "fulfilled") return result.value;
+  console.warn(`[mylog] ${label} skipped:`, result.reason);
+  return fallback;
+}
+
 export async function loadDashboardData(userId: string): Promise<DashboardData> {
   const today = getKstDateString();
   const kst = new Date(`${today}T12:00:00+09:00`);
 
-  const [todayEntries, todayAiReport, weekAiReports, allRoutines, recentLogs, monthMoodByDay, pastToday] =
-    await Promise.all([
-      loadTodayEntries(userId),
-      loadAiReportForDate(userId, today),
-      loadWeekAiReports(userId),
-      loadDetectedRoutines(userId),
-      loadRecentLogs(userId, today),
-      loadMonthMoodByDay(userId, kst.getFullYear(), kst.getMonth() + 1),
-      loadPastToday(userId, today),
-    ]);
+  const results = await Promise.allSettled([
+    loadTodayEntries(userId),
+    loadAiReportForDate(userId, today),
+    loadWeekAiReports(userId),
+    loadDetectedRoutines(userId),
+    loadRecentLogs(userId, today),
+    loadMonthMoodByDay(userId, kst.getFullYear(), kst.getMonth() + 1),
+    loadPastToday(userId, today),
+    countBooksDoneThisMonth(userId),
+  ]);
+
+  const todayResult = results[0];
+  if (todayResult.status === "rejected") {
+    const reason = todayResult.reason;
+    throw reason instanceof Error ? reason : new Error("오늘 기록을 불러오지 못했습니다.");
+  }
+
+  const todayEntries = todayResult.value;
+  const todayAiReport = settled(results[1], "ai_reports", null);
+  const weekAiReports = settled(results[2], "week reports", []);
+  const allRoutines = settled(results[3], "routines", []);
+  const recentLogs = settled(results[4], "recent logs", []);
+  const monthMoodByDay = settled(results[5], "calendar mood", {});
+  const pastToday = settled(results[6], "past today", []);
+  const booksReadThisMonth =
+    results[7].status === "fulfilled" ? results[7].value : 0;
 
   const confirmedRoutines = allRoutines.filter((r) => r.is_confirmed);
   const unconfirmedRoutines = allRoutines.filter((r) => !r.is_confirmed);
@@ -230,6 +254,7 @@ export async function loadDashboardData(userId: string): Promise<DashboardData> 
     monthMoodByDay,
     pastToday,
     todaySummary,
+    booksReadThisMonth,
   };
 }
 

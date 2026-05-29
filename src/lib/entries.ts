@@ -22,6 +22,7 @@ import {
 
 export type EntryCategory =
   | "meal"
+  | "book"
   | "exercise"
   | "activity"
   | "idea"
@@ -48,7 +49,7 @@ export type TimelineEntryStatus = "analyzing" | "analysis_failed" | "ready";
 export interface TimelineEntryView {
   id: string;
   time: string;
-  category: "식사" | "운동" | "활동" | "아이디어" | "수면" | "일정" | "루틴" | "기타";
+  category: "식사" | "독서" | "운동" | "활동" | "아이디어" | "수면" | "일정" | "루틴" | "기타";
   content: string;
   emotion?: string;
   /** optimistic UI 상태 */
@@ -59,6 +60,7 @@ export interface TimelineEntryView {
 
 const CATEGORY_TO_KOREAN: Record<EntryCategory, TimelineEntryView["category"]> = {
   meal: "식사",
+  book: "독서",
   exercise: "운동",
   activity: "활동",
   idea: "아이디어",
@@ -89,6 +91,24 @@ export async function loadTodayEntries(userId: string): Promise<EntryRecord[]> {
   }
 
   return (data ?? []) as EntryRecord[];
+}
+
+/** 로그인 계정에 연결된 전체 기록 수 (오늘만이 아님) */
+export async function countUserEntries(userId: string): Promise<number> {
+  const { count, error } = await withTimeout(
+    supabase
+      .from("entries")
+      .select("id", { count: "exact", head: true })
+      .eq("user_id", userId),
+    15000,
+    "기록 개수 조회 시간이 초과되었습니다.",
+  );
+
+  if (error) {
+    throw new Error(`기록 개수 조회 실패: ${error.message}`);
+  }
+
+  return count ?? 0;
 }
 
 export interface CreateEntryResult {

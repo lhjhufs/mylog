@@ -15,6 +15,7 @@ import {
   saveConfirmedRoutineFromTag,
   type DetectedRoutine,
 } from "@/lib/routines";
+import { saveBookFromAnalysis } from "@/lib/books";
 import { isRetryExhaustedError, MAX_503_RETRIES, RETRY_DELAY_MS, sleep } from "@/lib/retry";
 
 export interface AnalyzeEntryResult {
@@ -120,12 +121,32 @@ export async function analyzeAndUpdateEntry(
     throw new Error("분석 반영 후 데이터를 불러오지 못했습니다.");
   }
 
+  const entry = data as EntryRecord;
+
+  if (analysis.category === "book") {
+    try {
+      const savedBook = await saveBookFromAnalysis(userId, entry, analysis.parsed_data);
+      if (savedBook) {
+        analysis.parsed_data = { ...analysis.parsed_data, book_id: savedBook.id };
+        await supabase
+          .from("entries")
+          .update({ parsed_data: { ...analysis.parsed_data, analysis_status: "complete" } })
+          .eq("id", entryId)
+          .eq("user_id", userId);
+      }
+    } catch (bookError) {
+      if (import.meta.env.DEV) {
+        console.warn("[mylog] books 저장 실패:", bookError);
+      }
+    }
+  }
+
   if (!isRoutineTag) {
     const allRoutines = await loadDetectedRoutines(userId);
     await detectAndSaveRoutineSuggestions(userId, apiKey, allRoutines);
   }
 
-  return { entry: data as EntryRecord, savedRoutine };
+  return { entry, savedRoutine };
 }
 
 export async function markEntryAnalysisFailed(entryId: string): Promise<EntryRecord> {

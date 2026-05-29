@@ -11,6 +11,7 @@ interface TimelineEntryProps {
 
 const categoryIcons: Record<string, string> = {
   '식사': '🍚',
+  '독서': '📚',
   '운동': '🏃',
   '활동': '📝',
   '아이디어': '💡',

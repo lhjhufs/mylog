@@ -1,6 +1,12 @@
 import { addDaysToKstDateString, getKstDateString } from "@/lib/date";
 import { generateGeminiJson } from "@/lib/gemini";
 import type { EntryCategory } from "@/lib/entries";
+import {
+  isReadingRoutineName,
+  looksLikeBookInput,
+  matchReadingRoutine,
+  normalizeBookParsedData,
+} from "@/lib/books";
 import { looksLikeMealInput, normalizeMealParsedData } from "@/lib/meals";
 import { isRoutineTaggedInput, normalizeRoutineName, parseRoutineName } from "@/lib/routineTag";
 import type { DetectedRoutine } from "@/lib/routines";
@@ -24,6 +30,7 @@ const ALLOWED_CATEGORIES = new Set<EntryCategory>([
   "sleep",
   "schedule",
   "routine",
+  "book",
   "etc",
 ]);
 
@@ -67,10 +74,46 @@ function applyMealHeuristics(analysis: EntryAnalysis, rawInput: string): EntryAn
   return analysis;
 }
 
-function finalizeAnalysis(analysis: EntryAnalysis, rawInput: string): EntryAnalysis {
+function applyBookHeuristics(
+  analysis: EntryAnalysis,
+  rawInput: string,
+  confirmedRoutines: DetectedRoutine[],
+): EntryAnalysis {
+  if (analysis.category === "routine") return analysis;
+  if (!looksLikeBookInput(rawInput) && analysis.category !== "book") return analysis;
+
+  analysis.category = "book";
+  analysis.parsed_data = normalizeBookParsedData(analysis.parsed_data, rawInput);
+
+  if (!analysis.matched_routine_id && !analysis.matched_routine_name) {
+    const reading = matchReadingRoutine(confirmedRoutines);
+    if (reading) {
+      analysis.matched_routine_id = reading.id;
+      analysis.matched_routine_name = reading.name;
+      analysis.parsed_data = {
+        ...analysis.parsed_data,
+        matched_routine_id: reading.id,
+        matched_routine_name: reading.name,
+        source: "book_routine_match",
+      };
+    }
+  }
+
+  return analysis;
+}
+
+function finalizeAnalysis(
+  analysis: EntryAnalysis,
+  rawInput: string,
+  confirmedRoutines: DetectedRoutine[] = [],
+): EntryAnalysis {
   analysis = applyMealHeuristics(analysis, rawInput);
+  analysis = applyBookHeuristics(analysis, rawInput, confirmedRoutines);
   if (analysis.category === "meal") {
     analysis.parsed_data = normalizeMealParsedData(analysis.parsed_data, rawInput);
+  }
+  if (analysis.category === "book") {
+    analysis.parsed_data = normalizeBookParsedData(analysis.parsed_data, rawInput);
   }
   return analysis;
 }
@@ -116,7 +159,7 @@ export async function analyzeRoutineRegistration(
     routine_name: routineName,
     source: "user_tag",
   };
-  return finalizeAnalysis(analysis, rawInput);
+  return finalizeAnalysis(analysis, rawInput, []);
 }
 
 /** 등록된 루틴과 자연어 입력 매칭 */
@@ -144,7 +187,7 @@ ${routineListText}
 
 반환 스키마:
 {
-  "category": "meal|exercise|activity|idea|sleep|schedule|routine|etc",
+  "category": "meal|book|exercise|activity|idea|sleep|schedule|routine|etc",
   "emotion": "감정 요약",
   "mood_score": 1-10,
   "parsed_data": {},
@@ -161,16 +204,23 @@ ${routineListText}
    - 예: "두바이 슈크림 빵과 아메리카노 한 잔 먹음" → meal, { "food": "두바이 슈크림 빵, 아메리카노", "calories": 395 }
    - 예: "라떼 한 잔 마셨어" → meal, { "food": "라떼", "calories": 200 }
    - 여러 항목은 food에 쉼표로 나열, calories는 1인분 기준 합산(정수)
-2. 등록된 루틴 수행/완료 → category routine, matched_routine_id/name 채움
-3. 운동 → exercise_type, duration_minutes
-4. 일정 → schedule_time
-5. JSON만 반환
+2. 책 읽음/독서 완료 → category는 반드시 book
+   - parsed_data: { "title": "책 제목", "author": "저자 또는 null", "review": "간단 감상" }
+   - 예: "오늘 아토믹 해빗 읽음 재밌었어" → book, title "아토믹 해빗", review "재밌었어"
+   - 독서·책 읽기 관련 루틴이 등록되어 있으면 matched_routine_id/name도 채움
+3. 등록된 루틴 수행/완료(운동·청소 등) → category routine, matched_routine_id/name 채움
+4. 운동 → exercise_type, duration_minutes
+5. 일정 → schedule_time
+6. JSON만 반환
 `.trim();
 
   const payload = await generateGeminiJson<Record<string, unknown>>(apiKey, prompt);
   const analysis = normalizeAnalysis(payload);
 
-  if (analysis.matched_routine_id || analysis.matched_routine_name) {
+  if (
+    analysis.category !== "book" &&
+    (analysis.matched_routine_id || analysis.matched_routine_name)
+  ) {
     analysis.category = "routine";
     analysis.parsed_data = {
       ...analysis.parsed_data,
@@ -180,7 +230,7 @@ ${routineListText}
     };
   }
 
-  return finalizeAnalysis(analysis, rawInput);
+  return finalizeAnalysis(analysis, rawInput, confirmedRoutines);
 }
 
 interface RoutineSuggestion {
@@ -269,9 +319,19 @@ export function entryCompletesRoutine(
   entry: { category: string; raw_input: string; parsed_data: Record<string, unknown> },
   routine: DetectedRoutine,
 ): boolean {
-  if (entry.category !== "routine") return false;
-
   const parsed = entry.parsed_data ?? {};
+
+  if (entry.category === "book" && isReadingRoutineName(routine.name)) {
+    if (parsed.matched_routine_id === routine.id) return true;
+    const matchedName =
+      typeof parsed.matched_routine_name === "string" ? parsed.matched_routine_name : null;
+    if (matchedName && normalizeRoutineName(matchedName) === normalizeRoutineName(routine.name)) {
+      return true;
+    }
+    return true;
+  }
+
+  if (entry.category !== "routine") return false;
   if (parsed.matched_routine_id === routine.id) return true;
 
   const matchedName =

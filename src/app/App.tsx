@@ -4,6 +4,7 @@ import { RightPanel } from './components/RightPanel';
 import { Login } from './components/Login';
 import { Settings } from './components/Settings';
 import { MobileSwipeView } from './components/MobileSwipeView';
+import { useMediaQuery } from '@/hooks/useMediaQuery';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { toast, Toaster } from 'sonner';
 import { supabase } from '@/lib/supabase';
@@ -15,6 +16,7 @@ import {
   type AnalyzeEntryResult,
 } from '@/lib/entryPipeline';
 import {
+  countUserEntries,
   createEntryManual,
   createOptimisticTimelineEntry,
   deleteEntry,
@@ -23,6 +25,8 @@ import {
   toTimelineEntry,
   type TimelineEntryView,
 } from '@/lib/entries';
+import { getKstDateString } from '@/lib/date';
+import { deferAuthSideEffect } from '@/lib/auth';
 import { migrateRoutineEntriesFromEntries } from '@/lib/migrateRoutines';
 import { buildRoutineCompletionMap, countCompletedRoutinesToday } from '@/lib/routineAnalysis';
 import { buildTodaySummary } from '@/lib/dashboard';
@@ -39,6 +43,7 @@ const emptyDashboard: DashboardData = {
   monthMoodByDay: {},
   pastToday: [],
   todaySummary: { line: null, calories: null, moodLabel: null, routineDone: 0, routineTotal: 0 },
+  booksReadThisMonth: 0,
 };
 
 export default function App() {
@@ -48,14 +53,22 @@ export default function App() {
   const [dashboard, setDashboard] = useState<DashboardData>(emptyDashboard);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState('');
+  const [dashboardLoadError, setDashboardLoadError] = useState('');
+  const [dataHint, setDataHint] = useState<{
+    email: string;
+    totalEntries: number;
+    todayKst: string;
+  } | null>(null);
   const [userId, setUserId] = useState<string | null>(null);
   const submitLockRef = useRef(false);
   const analyzingIdsRef = useRef(new Set<string>());
   const entryRawInputRef = useRef(new Map<string, string>());
+  const isDesktop = useMediaQuery('(min-width: 1024px)');
 
   const refreshDashboard = useCallback(async (uid: string) => {
     const data = await loadDashboardData(uid);
     setDashboard(data);
+    setDashboardLoadError('');
     const seen = new Set<string>();
     const uniqueEntries = data.todayEntries
       .map(toTimelineEntry)
@@ -67,51 +80,68 @@ export default function App() {
     setEntries(uniqueEntries);
   }, []);
 
-  useEffect(() => {
-    const bootstrap = async () => {
-      const {
-        data: { session },
-      } = await supabase.auth.getSession();
-
-      const user = session?.user ?? null;
-      setIsLoggedIn(Boolean(user));
-      setUserId(user?.id ?? null);
-
-      if (user) {
-        try {
-          await migrateRoutineEntriesFromEntries(user.id);
-          await refreshDashboard(user.id);
-        } catch (error) {
-          console.error('Failed to load dashboard:', error);
-        }
+  const syncUserData = useCallback(
+    async (uid: string) => {
+      try {
+        await migrateRoutineEntriesFromEntries(uid);
+      } catch (error) {
+        console.error('Routine migration skipped:', error);
       }
-    };
+      try {
+        await refreshDashboard(uid);
+        const {
+          data: { session },
+        } = await supabase.auth.getSession();
+        const totalEntries = await countUserEntries(uid);
+        setDataHint({
+          email: session?.user?.email ?? '',
+          totalEntries,
+          todayKst: getKstDateString(),
+        });
+      } catch (error) {
+        console.error('Failed to load dashboard:', error);
+        const message =
+          error instanceof Error ? error.message : '데이터를 불러오지 못했습니다.';
+        setDashboardLoadError(message);
+        setDataHint(null);
+        toast.error('기록을 불러오지 못했습니다', {
+          description: `${message} — F5로 새로고침하거나 설정에서 로그인 계정을 확인해주세요.`,
+          duration: 10000,
+        });
+      }
+    },
+    [refreshDashboard],
+  );
 
-    bootstrap();
-
-    const { data: authListener } = supabase.auth.onAuthStateChange(async (event, session) => {
+  useEffect(() => {
+    const { data: authListener } = supabase.auth.onAuthStateChange((event, session) => {
       const user = session?.user ?? null;
       setIsLoggedIn(Boolean(user));
       setUserId(user?.id ?? null);
+
       if (!user) {
         setEntries([]);
         setDashboard(emptyDashboard);
+        setDashboardLoadError('');
+        setDataHint(null);
         return;
       }
-      // INITIAL_SESSION은 bootstrap에서 이미 로드함 — 중복 요청 방지
-      if (event === 'INITIAL_SESSION') return;
-      try {
-        await migrateRoutineEntriesFromEntries(user.id);
-        await refreshDashboard(user.id);
-      } catch (error) {
-        console.error('Failed to sync dashboard after auth change:', error);
+
+      if (
+        event === 'INITIAL_SESSION' ||
+        event === 'SIGNED_IN' ||
+        event === 'TOKEN_REFRESHED'
+      ) {
+        deferAuthSideEffect(() => {
+          void syncUserData(user.id);
+        });
       }
     });
 
     return () => {
       authListener.subscription.unsubscribe();
     };
-  }, [refreshDashboard]);
+  }, [syncUserData]);
 
   const applyAnalysisToDashboard = useCallback((result: AnalyzeEntryResult) => {
     const { entry, savedRoutine } = result;
@@ -159,6 +189,19 @@ export default function App() {
         }
       } catch (error) {
         console.error('Failed to analyze entry:', error);
+        const message = error instanceof Error ? error.message : '';
+        if (/enum entry_category.*book/i.test(message)) {
+          toast.error('DB에 book 카테고리가 없습니다', {
+            description:
+              'Supabase SQL Editor에서 supabase/entry_category_book.sql 을 실행한 뒤 「분석 재시도」를 눌러주세요.',
+            duration: 8000,
+          });
+        } else if (/429|quota|Gemini 호출 실패/i.test(message)) {
+          toast.error('Gemini 사용 한도 초과', {
+            description: '잠시 후 「분석 재시도」를 누르거나 API 요금제를 확인해주세요.',
+            duration: 8000,
+          });
+        }
         try {
           const failed = await markEntryAnalysisFailed(entryId);
           setEntries((prev) =>
@@ -349,81 +392,92 @@ export default function App() {
   return (
     <>
       <Toaster position="top-center" richColors closeButton />
-      <div className="hidden lg:flex size-full bg-white relative">
-        <Sidebar
-          onSettingsClick={() => setSettingsOpen(true)}
-          recentLogs={dashboard.recentLogs}
-          confirmedRoutines={dashboard.confirmedRoutines}
-          unconfirmedRoutines={dashboard.unconfirmedRoutines}
-          routineDone={dashboard.todaySummary.routineDone}
-          routineTotal={dashboard.todaySummary.routineTotal}
-          routineCompletionMap={dashboard.routineCompletionMap}
-          onConfirmRoutineSuggestion={handleConfirmRoutineSuggestion}
-          onDismissRoutineSuggestion={handleDismissRoutineSuggestion}
-          monthMoodByDay={dashboard.monthMoodByDay}
-          userId={userId}
-        />
 
-        <CenterTimeline
-          entries={entries}
-          onSubmitEntry={handleSubmitEntry}
-          onCreateManualEntry={handleCreateManualEntry}
-          onUpdateEntry={handleUpdateEntry}
-          onDeleteEntry={handleDeleteEntry}
-          onRetryAnalysis={handleRetryAnalysis}
-          isSubmitting={isSubmitting}
-          submitError={submitError}
-          todaySummary={dashboard.todaySummary}
-        />
-
-        <RightPanel
-          todayAiReport={dashboard.todayAiReport}
-          weekAiReports={dashboard.weekAiReports}
-          todaySummary={dashboard.todaySummary}
-          pastToday={dashboard.pastToday}
-        />
-
-        {settingsOpen && (
-          <Settings
-            onClose={() => setSettingsOpen(false)}
-            onRoutineConfirmed={handleRoutineConfirmed}
+      {isDesktop ? (
+        <div className="flex size-full bg-white relative">
+          <Sidebar
+            onSettingsClick={() => setSettingsOpen(true)}
+            recentLogs={dashboard.recentLogs}
+            confirmedRoutines={dashboard.confirmedRoutines}
+            unconfirmedRoutines={dashboard.unconfirmedRoutines}
+            routineDone={dashboard.todaySummary.routineDone}
+            routineTotal={dashboard.todaySummary.routineTotal}
+            routineCompletionMap={dashboard.routineCompletionMap}
+            onConfirmRoutineSuggestion={handleConfirmRoutineSuggestion}
+            onDismissRoutineSuggestion={handleDismissRoutineSuggestion}
+            monthMoodByDay={dashboard.monthMoodByDay}
+            userId={userId}
           />
-        )}
-      </div>
 
-      <div className="lg:hidden size-full">
-        <MobileSwipeView
-          onSettingsClick={() => setSettingsOpen(true)}
-          entries={entries}
-          onSubmitEntry={handleSubmitEntry}
-          onCreateManualEntry={handleCreateManualEntry}
-          onUpdateEntry={handleUpdateEntry}
-          onDeleteEntry={handleDeleteEntry}
-          onRetryAnalysis={handleRetryAnalysis}
-          isSubmitting={isSubmitting}
-          submitError={submitError}
-          todaySummary={dashboard.todaySummary}
-          recentLogs={dashboard.recentLogs}
-          confirmedRoutines={dashboard.confirmedRoutines}
-          unconfirmedRoutines={dashboard.unconfirmedRoutines}
-          routineDone={dashboard.todaySummary.routineDone}
-          routineTotal={dashboard.todaySummary.routineTotal}
-          routineCompletionMap={dashboard.routineCompletionMap}
-          onConfirmRoutineSuggestion={handleConfirmRoutineSuggestion}
-          onDismissRoutineSuggestion={handleDismissRoutineSuggestion}
-          monthMoodByDay={dashboard.monthMoodByDay}
-          userId={userId}
-          todayAiReport={dashboard.todayAiReport}
-          weekAiReports={dashboard.weekAiReports}
-          pastToday={dashboard.pastToday}
-        />
-        {settingsOpen && (
-          <Settings
-            onClose={() => setSettingsOpen(false)}
-            onRoutineConfirmed={handleRoutineConfirmed}
+          <CenterTimeline
+            entries={entries}
+            onSubmitEntry={handleSubmitEntry}
+            onCreateManualEntry={handleCreateManualEntry}
+            onUpdateEntry={handleUpdateEntry}
+            onDeleteEntry={handleDeleteEntry}
+            onRetryAnalysis={handleRetryAnalysis}
+            isSubmitting={isSubmitting}
+            submitError={submitError}
+            dashboardLoadError={dashboardLoadError}
+            dataHint={dataHint}
+            todaySummary={dashboard.todaySummary}
           />
-        )}
-      </div>
+
+          <RightPanel
+            todayAiReport={dashboard.todayAiReport}
+            weekAiReports={dashboard.weekAiReports}
+            todaySummary={dashboard.todaySummary}
+            pastToday={dashboard.pastToday}
+            booksReadThisMonth={dashboard.booksReadThisMonth}
+          />
+
+          {settingsOpen && (
+            <Settings
+              onClose={() => setSettingsOpen(false)}
+              onRoutineConfirmed={handleRoutineConfirmed}
+              userId={userId}
+            />
+          )}
+        </div>
+      ) : (
+        <div className="size-full">
+          <MobileSwipeView
+            onSettingsClick={() => setSettingsOpen(true)}
+            entries={entries}
+            onSubmitEntry={handleSubmitEntry}
+            onCreateManualEntry={handleCreateManualEntry}
+            onUpdateEntry={handleUpdateEntry}
+            onDeleteEntry={handleDeleteEntry}
+            onRetryAnalysis={handleRetryAnalysis}
+            isSubmitting={isSubmitting}
+            submitError={submitError}
+            dashboardLoadError={dashboardLoadError}
+            dataHint={dataHint}
+            todaySummary={dashboard.todaySummary}
+            recentLogs={dashboard.recentLogs}
+            confirmedRoutines={dashboard.confirmedRoutines}
+            unconfirmedRoutines={dashboard.unconfirmedRoutines}
+            routineDone={dashboard.todaySummary.routineDone}
+            routineTotal={dashboard.todaySummary.routineTotal}
+            routineCompletionMap={dashboard.routineCompletionMap}
+            onConfirmRoutineSuggestion={handleConfirmRoutineSuggestion}
+            onDismissRoutineSuggestion={handleDismissRoutineSuggestion}
+            monthMoodByDay={dashboard.monthMoodByDay}
+            userId={userId}
+            todayAiReport={dashboard.todayAiReport}
+            weekAiReports={dashboard.weekAiReports}
+            pastToday={dashboard.pastToday}
+            booksReadThisMonth={dashboard.booksReadThisMonth}
+          />
+          {settingsOpen && (
+            <Settings
+              onClose={() => setSettingsOpen(false)}
+              onRoutineConfirmed={handleRoutineConfirmed}
+              userId={userId}
+            />
+          )}
+        </div>
+      )}
     </>
   );
 }

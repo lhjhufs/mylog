@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { Pencil, Trash2, X, Check } from 'lucide-react';
 import { testGeminiConnection } from '@/lib/gemini';
 import { downloadEntriesCsv, downloadUserDataJson } from '@/lib/export';
+import { deferAuthSideEffect, getAuthUser } from '@/lib/auth';
 import { getMySettings, saveMySettings } from '@/lib/settings';
 import { supabase } from '@/lib/supabase';
 import {
@@ -12,13 +13,16 @@ import {
   updateDetectedRoutine,
   type DetectedRoutine,
 } from '@/lib/routines';
+import { loadUserBooks, updateBook, type BookRecord } from '@/lib/books';
+import { formatKstShortDate } from '@/lib/date';
 
-type SettingsSection = 'profile' | 'api' | 'routines' | 'data';
+type SettingsSection = 'profile' | 'api' | 'routines' | 'books' | 'data';
 type StatusKind = 'idle' | 'success' | 'error';
 
 interface SettingsProps {
   onClose: () => void;
   onRoutineConfirmed?: () => void;
+  userId?: string | null;
 }
 
 function statusClass(kind: StatusKind): string {
@@ -27,7 +31,7 @@ function statusClass(kind: StatusKind): string {
   return 'text-[#6B6B6B]';
 }
 
-export function Settings({ onClose, onRoutineConfirmed }: SettingsProps) {
+export function Settings({ onClose, onRoutineConfirmed, userId }: SettingsProps) {
   const [activeSection, setActiveSection] = useState<SettingsSection>('profile');
 
   return (
@@ -51,6 +55,7 @@ export function Settings({ onClose, onRoutineConfirmed }: SettingsProps) {
                 ['profile', '👤 프로필'],
                 ['api', '🔑 API 연동'],
                 ['routines', '🔁 루틴 관리'],
+                ['books', '📚 읽은 책'],
                 ['data', '💾 데이터 관리'],
               ] as const
             ).map(([id, label]) => (
@@ -71,11 +76,12 @@ export function Settings({ onClose, onRoutineConfirmed }: SettingsProps) {
         </div>
 
         <div className="flex-1 p-4 sm:p-6 lg:p-8 overflow-y-auto">
-          {activeSection === 'profile' && <ProfileSection onClose={onClose} />}
+          {activeSection === 'profile' && <ProfileSection onClose={onClose} userId={userId} />}
           {activeSection === 'api' && <APISection />}
           {activeSection === 'routines' && (
             <RoutinesSection onRoutineConfirmed={onRoutineConfirmed} />
           )}
+          {activeSection === 'books' && <BooksSection />}
           {activeSection === 'data' && <DataSection />}
         </div>
       </div>
@@ -83,10 +89,17 @@ export function Settings({ onClose, onRoutineConfirmed }: SettingsProps) {
   );
 }
 
-function ProfileSection({ onClose }: { onClose: () => void }) {
+function ProfileSection({
+  onClose,
+  userId,
+}: {
+  onClose: () => void;
+  userId?: string | null;
+}) {
   const [displayName, setDisplayName] = useState('');
   const [email, setEmail] = useState('');
   const [avatarLetter, setAvatarLetter] = useState('?');
+  const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [isLoggingOut, setIsLoggingOut] = useState(false);
   const [status, setStatus] = useState<{ kind: StatusKind; message: string }>({
@@ -94,35 +107,87 @@ function ProfileSection({ onClose }: { onClose: () => void }) {
     message: '',
   });
 
-  useEffect(() => {
-    const loadProfile = async () => {
-      const {
-        data: { session },
-      } = await supabase.auth.getSession();
-      const user = session?.user;
-      if (!user) return;
+  const loadProfile = useCallback(async () => {
+    setIsLoading(true);
 
-      const authFallback =
-        (user.user_metadata?.full_name as string | undefined) ??
-        (user.user_metadata?.name as string | undefined) ??
-        user.email?.split('@')[0] ??
-        '';
+    let user;
+    try {
+      user = await getAuthUser();
+    } catch (error) {
+      setEmail('');
+      setDisplayName('');
+      setAvatarLetter('?');
+      setStatus({
+        kind: 'error',
+        message:
+          error instanceof Error
+            ? error.message
+            : 'Supabase 로그인 정보를 불러오지 못했습니다.',
+      });
+      setIsLoading(false);
+      return;
+    }
 
-      setEmail(user.email ?? '');
+    if (!user) {
+      setEmail('');
+      setDisplayName('');
+      setAvatarLetter('?');
+      setStatus({
+        kind: 'error',
+        message: '로그인 정보를 불러오지 못했습니다. F5로 새로고침해주세요.',
+      });
+      setIsLoading(false);
+      return;
+    }
 
-      try {
-        const settings = await getMySettings();
-        const name = settings?.display_name?.trim() || authFallback;
-        setDisplayName(name);
-        setAvatarLetter(name.charAt(0) || '?');
-      } catch {
-        setDisplayName(authFallback);
-        setAvatarLetter(authFallback.charAt(0) || '?');
-      }
-    };
+    const authFallback =
+      (user.user_metadata?.full_name as string | undefined) ??
+      (user.user_metadata?.name as string | undefined) ??
+      user.email?.split('@')[0] ??
+      '사용자';
 
-    loadProfile();
+    setEmail(user.email ?? '(이메일 없음)');
+
+    try {
+      const settings = await getMySettings();
+      const name = settings?.display_name?.trim() || authFallback;
+      setDisplayName(name);
+      setAvatarLetter(name.charAt(0) || '?');
+      setStatus({ kind: 'idle', message: '' });
+    } catch (error) {
+      setDisplayName(authFallback);
+      setAvatarLetter(authFallback.charAt(0) || '?');
+      setStatus({
+        kind: 'error',
+        message:
+          error instanceof Error
+            ? error.message
+            : '프로필 설정을 불러오지 못했습니다.',
+      });
+    } finally {
+      setIsLoading(false);
+    }
   }, []);
+
+  useEffect(() => {
+    void loadProfile();
+
+    const { data: authListener } = supabase.auth.onAuthStateChange((event) => {
+      if (
+        event === 'INITIAL_SESSION' ||
+        event === 'SIGNED_IN' ||
+        event === 'TOKEN_REFRESHED'
+      ) {
+        deferAuthSideEffect(() => {
+          void loadProfile();
+        });
+      }
+    });
+
+    return () => {
+      authListener.subscription.unsubscribe();
+    };
+  }, [loadProfile, userId]);
 
   const handleSaveName = async () => {
     const trimmed = displayName.trim();
@@ -167,6 +232,10 @@ function ProfileSection({ onClose }: { onClose: () => void }) {
   return (
     <div>
       <h3 className="text-xl sm:text-2xl font-semibold text-[#1A1A1A] mb-4 sm:mb-6">프로필</h3>
+
+      {isLoading ? (
+        <p className="text-sm text-[#6B6B6B] mb-4">프로필 불러오는 중...</p>
+      ) : null}
 
       <div className="space-y-3 sm:space-y-4 mb-6 sm:mb-8">
         <div className="flex items-center gap-4 mb-4 sm:mb-6">
@@ -626,6 +695,157 @@ function RoutinesSection({ onRoutineConfirmed }: { onRoutineConfirmed?: () => vo
   );
 }
 
+function BooksSection() {
+  const [books, setBooks] = useState<BookRecord[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editReview, setEditReview] = useState('');
+  const [editInsight, setEditInsight] = useState('');
+  const [error, setError] = useState('');
+
+  const loadBooks = useCallback(async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+      if (!session?.user) return;
+      const list = await loadUserBooks(session.user.id);
+      setBooks(list);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '책 목록 불러오기 실패');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadBooks();
+  }, [loadBooks]);
+
+  const startEdit = (book: BookRecord) => {
+    setEditingId(book.id);
+    setEditReview(book.review ?? '');
+    setEditInsight(book.insight ?? '');
+  };
+
+  const handleSaveEdit = async (id: string) => {
+    try {
+      const updated = await updateBook(id, {
+        review: editReview.trim() || null,
+        insight: editInsight.trim() || null,
+      });
+      setBooks((prev) => prev.map((b) => (b.id === id ? updated : b)));
+      setEditingId(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '저장 실패');
+    }
+  };
+
+  return (
+    <div>
+      <h3 className="text-xl sm:text-2xl font-semibold text-[#1A1A1A] mb-4 sm:mb-6">읽은 책</h3>
+      <p className="text-xs sm:text-sm text-[#6B6B6B] mb-4">
+        기록에서 독서로 분류된 책이 자동으로 저장됩니다. 감상·인사이트는 나중에 추가할 수 있습니다.
+      </p>
+
+      {error ? <p className="text-xs text-[#E53E3E] mb-4">❌ {error}</p> : null}
+
+      {loading ? (
+        <p className="text-sm text-[#999999]">불러오는 중...</p>
+      ) : books.length === 0 ? (
+        <p className="text-sm text-[#999999]">저장된 책이 없습니다.</p>
+      ) : (
+        <div className="space-y-3">
+          {books.map((book) => (
+            <div
+              key={book.id}
+              className="p-3 sm:p-4 border border-[#E5E5E5] rounded-lg"
+            >
+              {editingId === book.id ? (
+                <div className="space-y-3">
+                  <div>
+                    <p className="text-sm font-medium text-[#1A1A1A]">{book.title}</p>
+                    {book.author ? (
+                      <p className="text-xs text-[#6B6B6B] mt-0.5">{book.author}</p>
+                    ) : null}
+                  </div>
+                  <div>
+                    <label className="block text-xs text-[#6B6B6B] mb-1">감상</label>
+                    <textarea
+                      value={editReview}
+                      onChange={(e) => setEditReview(e.target.value)}
+                      rows={2}
+                      className="w-full text-sm px-2 py-1 border border-[#E5E5E5] rounded-lg resize-y"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-[#6B6B6B] mb-1">인사이트</label>
+                    <textarea
+                      value={editInsight}
+                      onChange={(e) => setEditInsight(e.target.value)}
+                      rows={3}
+                      placeholder="지식허브 연동용 상세 메모"
+                      className="w-full text-sm px-2 py-1 border border-[#E5E5E5] rounded-lg resize-y"
+                    />
+                  </div>
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => handleSaveEdit(book.id)}
+                      className="px-3 py-1.5 text-sm bg-black text-white rounded-lg"
+                    >
+                      저장
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setEditingId(null)}
+                      className="px-3 py-1.5 text-sm border border-[#E5E5E5] rounded-lg"
+                    >
+                      취소
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm sm:text-base font-medium text-[#1A1A1A] truncate">
+                      {book.title}
+                    </p>
+                    {book.author ? (
+                      <p className="text-xs text-[#6B6B6B]">{book.author}</p>
+                    ) : null}
+                    <p className="text-xs text-[#999999] mt-1">
+                      {book.read_date ? formatKstShortDate(book.read_date) : '날짜 없음'}
+                    </p>
+                    {book.review ? (
+                      <p className="text-sm text-[#1A1A1A] mt-2 line-clamp-2">{book.review}</p>
+                    ) : (
+                      <p className="text-xs text-[#999999] mt-2">감상 없음</p>
+                    )}
+                    {book.insight ? (
+                      <p className="text-xs text-[#6B6B6B] mt-1 line-clamp-2">💡 {book.insight}</p>
+                    ) : null}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => startEdit(book)}
+                    className="p-1.5 text-[#6B6B6B] hover:bg-[#F7F7F5] rounded flex-shrink-0"
+                    aria-label="수정"
+                  >
+                    <Pencil size={16} />
+                  </button>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function DataSection() {
   const [isJsonLoading, setIsJsonLoading] = useState(false);
   const [isCsvLoading, setIsCsvLoading] = useState(false);
@@ -691,7 +911,7 @@ function DataSection() {
           </button>
         </div>
         <p className="text-xs sm:text-sm text-[#6B6B6B]">
-          JSON: entries, detected_routines, ai_reports 전체 · CSV: entries만
+          JSON: entries, detected_routines, ai_reports, books 전체 · CSV: entries만
         </p>
         {status.message ? (
           <p className={`mt-2 text-xs ${statusClass(status.kind)}`}>

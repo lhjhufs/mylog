@@ -1,5 +1,6 @@
 import { requireUserId, withTimeout } from "@/lib/auth";
 import type { EntryRecord } from "@/lib/entries";
+import type { BookRecord } from "@/lib/books";
 import type { DetectedRoutine } from "@/lib/routines";
 import type { AiReport } from "@/lib/reports";
 import { supabase } from "@/lib/supabase";
@@ -54,6 +55,20 @@ async function loadAllRoutines(userId: string): Promise<DetectedRoutine[]> {
   return (data ?? []) as DetectedRoutine[];
 }
 
+async function loadAllBooks(userId: string): Promise<BookRecord[]> {
+  const { data, error } = await withTimeout(
+    supabase.from("books").select("*").eq("user_id", userId).order("read_date", { ascending: false }),
+    30000,
+    "books 조회 시간이 초과되었습니다.",
+  );
+
+  if (error) {
+    throw new Error(`books 조회 실패: ${error.message}`);
+  }
+
+  return (data ?? []) as BookRecord[];
+}
+
 async function loadAllAiReports(userId: string): Promise<AiReport[]> {
   const { data, error } = await withTimeout(
     supabase.from("ai_reports").select("*").eq("user_id", userId).order("date", { ascending: false }),
@@ -70,10 +85,11 @@ async function loadAllAiReports(userId: string): Promise<AiReport[]> {
 
 export async function downloadUserDataJson(): Promise<void> {
   const userId = await requireUserId();
-  const [entries, detected_routines, ai_reports] = await Promise.all([
+  const [entries, detected_routines, ai_reports, books] = await Promise.all([
     loadAllEntries(userId),
     loadAllRoutines(userId),
     loadAllAiReports(userId),
+    loadAllBooks(userId),
   ]);
 
   const payload = {
@@ -81,6 +97,7 @@ export async function downloadUserDataJson(): Promise<void> {
     entries,
     detected_routines,
     ai_reports,
+    books,
   };
 
   const blob = new Blob([JSON.stringify(payload, null, 2)], {
