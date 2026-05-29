@@ -1,11 +1,20 @@
+# 마이로그 (mylog)
 
-  # Personal Daily Logging App
+개인 일기·루틴·식사 기록 앱 (React + Vite + Supabase + Gemini)
 
-  This is a code bundle for Personal Daily Logging App. The original project is available at https://www.figma.com/design/i6sw30jEZCCbXJtjv8dykK/Personal-Daily-Logging-App.
+## 로컬 실행
 
-  ## Running the code
+```bash
+corepack pnpm install
+cp .env.example .env   # Supabase 키 입력
+corepack pnpm dev
+```
 
-  Run `npm i` to install the dependencies.
+## 배포
 
-  Run `npm run dev` to start the development server.
-  
+GitHub → Vercel → Supabase OAuth 설정은 **[DEPLOY.md](./DEPLOY.md)** 를 따르세요.
+
+필수 Vercel 환경 변수:
+
+- `VITE_SUPABASE_URL`
+- `VITE_SUPABASE_ANON_KEY`

@@ -53,7 +53,7 @@ Vercel 프로젝트 → **Settings → Environment Variables**
 
 | Name | Value | Environments |
 |------|--------|--------------|
-| `VITE_SUPABASE_URL` | `https://jikcnpliauczluwpmozo.supabase.co` | Production, Preview, Development |
+| `VITE_SUPABASE_URL` | Supabase **Project URL** (예: `https://xxxx.supabase.co`) | Production, Preview, Development |
 | `VITE_SUPABASE_ANON_KEY` | Supabase 대시보드의 **anon public** 키 | Production, Preview, Development |
 
 저장 후 **Redeploy** (Deployments → ⋯ → Redeploy).
@@ -93,8 +93,10 @@ http://localhost:5173
 **Authorized redirect URIs** (Supabase 콜백 — 프로젝트마다 다름)
 
 ```
-https://jikcnpliauczluwpmozo.supabase.co/auth/v1/callback
+https://YOUR_PROJECT_REF.supabase.co/auth/v1/callback
 ```
+
+(Supabase 대시보드 → Authentication → Providers → Google 에 표시된 Callback URL 을 그대로 복사)
 
 ### B. Supabase에서 Google Provider
 
