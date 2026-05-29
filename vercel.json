@@ -1,0 +1,15 @@
+{
+  "buildCommand": "corepack pnpm install && corepack pnpm build",
+  "outputDirectory": "dist",
+  "framework": "vite",
+  "rewrites": [
+    {
+      "source": "/api/gemini/(.*)",
+      "destination": "https://generativelanguage.googleapis.com/$1"
+    },
+    {
+      "source": "/((?!api/).*)",
+      "destination": "/index.html"
+    }
+  ]
+}
